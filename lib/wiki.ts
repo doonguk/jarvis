@@ -32,8 +32,34 @@ function getWikiRoot(): string {
 }
 
 /**
- * dir 아래의 모든 .md 파일 절대경로를 재귀로 수집.
+ * RAG 인덱싱에서 제외할 위키 메타 파일 basename.
+ *
+ * 이유: 이 파일들은 "위키 운영 규칙"이나 "목차/이력" 같은 메타 정보로,
+ * 사용자가 던지는 일반 질문(예: "React가 뭐야?")의 답변에 인용되면
+ * RAG 의미가 깨진다. Block 10에서 `[[CLAUDE]]`가 top-1로 박힌 게 발견됨.
+ *
+ * 같은 이름의 일반 콘텐츠 페이지를 만들 일은 없다는 전제 — 위키 컨벤션상
+ * 이 basename들은 항상 메타 파일.
+ */
+const INDEXING_EXCLUDED_BASENAMES = new Set([
+  "CLAUDE.md",
+  "AGENTS.md",
+  "index.md",
+  "log.md",
+  "ideas.md",
+]);
+
+/** RAG 인덱싱 대상 파일인지. 메타 파일은 제외. */
+function isIndexable(absolutePath: string): boolean {
+  return !INDEXING_EXCLUDED_BASENAMES.has(path.basename(absolutePath));
+}
+
+/**
+ * dir 아래의 모든 .md 파일 절대경로를 재귀로 수집. (메타 파일 포함, 필터 X)
  * 숨김 폴더(.obsidian, .git 등)는 제외.
+ *
+ * RAG 인덱싱용 필터는 loadAllDocuments에서 적용 — 의미 분리.
+ * 진짜 모든 파일이 필요하면 이 함수, 인덱싱 대상만 필요하면 loadAllDocuments.
  */
 export async function listMarkdownFiles(dir?: string): Promise<string[]> {
   const root = dir ?? getWikiRoot();
@@ -76,8 +102,13 @@ export async function loadDocument(absPath: string): Promise<Document> {
   };
 }
 
-/** wiki 전체 → Document[] */
+/**
+ * wiki 전체 → Document[] (RAG 인덱싱 대상만, 메타 파일 제외).
+ *
+ * 제외 대상은 INDEXING_EXCLUDED_BASENAMES 참고.
+ */
 export async function loadAllDocuments(): Promise<Document[]> {
   const files = await listMarkdownFiles();
-  return Promise.all(files.map(loadDocument));
+  const indexableFiles = files.filter(isIndexable);
+  return Promise.all(indexableFiles.map(loadDocument));
 }
