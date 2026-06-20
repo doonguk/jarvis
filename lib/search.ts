@@ -54,6 +54,11 @@ export type SearchHit = {
   rawScore: number;
   /** 이 문서에 적용된 source 가중치. */
   weight: number;
+  /**
+   * 문서 본문 전체. Block 10에서 buildPrompt가 Claude 컨텍스트로 박을 때 사용.
+   * Day 1은 청킹 X라 페이지 통째 — 1주차 청킹 도입 후엔 chunk 단위로 바뀜.
+   */
+  content: string;
   /** 디버그 가독성용 미리보기 (앞 120자) */
   preview: string;
 };
@@ -96,6 +101,7 @@ export async function search(
       rawScore,
       weight,
       score: weighted ? rawScore * weight : rawScore,
+      content: document.content,
       preview: document.content.slice(0, 120).replace(/\s+/g, " "),
     };
   });
