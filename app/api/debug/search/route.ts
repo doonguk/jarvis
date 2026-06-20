@@ -9,9 +9,9 @@ import { getIndex } from "@/lib/store";
  *
  * 첫 호출은 wiki 빌드 + 임베딩으로 ~1.5초 걸림. 두 번째부터 즉시.
  */
-export async function GET(req: Request) {
+export async function GET(request: Request) {
   try {
-    const url = new URL(req.url);
+    const url = new URL(request.url);
     const q = url.searchParams.get("q");
 
     if (!q) {
@@ -43,9 +43,9 @@ export async function GET(req: Request) {
         score: +h.score.toFixed(4),
       })),
     });
-  } catch (err) {
+  } catch (error) {
     return Response.json(
-      { error: err instanceof Error ? err.message : "unknown" },
+      { error: error instanceof Error ? error.message : "unknown" },
       { status: 500 }
     );
   }

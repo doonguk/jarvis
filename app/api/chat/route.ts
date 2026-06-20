@@ -7,9 +7,9 @@ const client = new Anthropic({
 // 클라이언트가 보낼 메시지 모양 (page.tsx의 Message 타입과 동일)
 type ChatMessage = { role: "user" | "assistant"; content: string };
 
-export async function POST(req: Request) {
+export async function POST(request: Request) {
   try {
-    const { messages } = (await req.json()) as { messages: ChatMessage[] };
+    const { messages } = (await request.json()) as { messages: ChatMessage[] };
 
     if (!Array.isArray(messages) || messages.length === 0) {
       return Response.json(
@@ -36,10 +36,10 @@ export async function POST(req: Request) {
       text,
       usage: response.usage, // 학습용: 토큰 사용량 확인
     });
-  } catch (err) {
-    console.error("[/api/chat] error:", err);
+  } catch (error) {
+    console.error("[/api/chat] error:", error);
     return Response.json(
-      { error: err instanceof Error ? err.message : "unknown" },
+      { error: error instanceof Error ? error.message : "unknown" },
       { status: 500 }
     );
   }

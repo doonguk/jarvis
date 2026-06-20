@@ -15,9 +15,9 @@ import { embedOne } from "@/lib/embed";
  *   - top-1이 바뀌는 쿼리가 있는지
  *   효과 없으면 가중치 빼고 1주차 청킹 도입으로 직행.
  */
-export async function GET(req: Request) {
+export async function GET(request: Request) {
   try {
-    const url = new URL(req.url);
+    const url = new URL(request.url);
     const q = url.searchParams.get("q");
     const k = Math.max(1, Math.min(10, Number(url.searchParams.get("k") ?? 5)));
 

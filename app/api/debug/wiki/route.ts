@@ -19,9 +19,9 @@ export async function GET() {
         contentLength: d.content.length,
       })),
     });
-  } catch (err) {
+  } catch (error) {
     return Response.json(
-      { error: err instanceof Error ? err.message : "unknown" },
+      { error: error instanceof Error ? error.message : "unknown" },
       { status: 500 }
     );
   }
