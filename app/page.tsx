@@ -1,64 +1,121 @@
-import Image from "next/image";
+"use client";
+
+import { useState } from "react";
+
+type Role = "user" | "assistant";
+type Message = { role: Role; content: string };
 
 export default function Home() {
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [input, setInput] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const text = input.trim();
+    if (!text || isLoading) return;
+
+    // 1) 새 user 메시지를 포함한 다음 상태를 미리 만든다.
+    //    setState는 비동기라서 fetch 바디에 그대로 쓰면 안 됨 (stale).
+    const nextMessages: Message[] = [
+      ...messages,
+      { role: "user", content: text },
+    ];
+    setMessages(nextMessages);
+    setInput("");
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: nextMessages }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
+
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: data.text ?? "" },
+      ]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "unknown error");
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
+    <div className="flex flex-1 flex-col items-center bg-zinc-50 dark:bg-black">
+      <main className="flex w-full max-w-2xl flex-1 flex-col">
+        <header className="px-4 py-3 border-b border-zinc-200 dark:border-zinc-800">
+          <h1 className="text-sm font-medium text-zinc-600 dark:text-zinc-400">
+            jarvis
           </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+        </header>
+
+        <div className="flex-1 overflow-y-auto px-4 py-6 space-y-4">
+          {messages.length === 0 && !isLoading && (
+            <p className="text-sm text-zinc-400 dark:text-zinc-600">
+              아무거나 쳐보기.
+            </p>
+          )}
+          {messages.map((m, i) => (
+            <div
+              key={i}
+              className={
+                m.role === "user" ? "flex justify-end" : "flex justify-start"
+              }
             >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+              <div
+                className={
+                  "max-w-[80%] rounded-2xl px-4 py-2 text-sm whitespace-pre-wrap " +
+                  (m.role === "user"
+                    ? "bg-zinc-900 text-white dark:bg-white dark:text-black"
+                    : "bg-zinc-200 text-black dark:bg-zinc-800 dark:text-white")
+                }
+              >
+                {m.content}
+              </div>
+            </div>
+          ))}
+          {isLoading && (
+            <div className="flex justify-start">
+              <div className="rounded-2xl px-4 py-2 text-sm bg-zinc-200 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
+                답하는 중…
+              </div>
+            </div>
+          )}
+          {error && (
+            <div className="flex justify-start">
+              <div className="rounded-2xl px-4 py-2 text-sm bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300">
+                에러: {error}
+              </div>
+            </div>
+          )}
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+
+        <form
+          onSubmit={handleSubmit}
+          className="border-t border-zinc-200 dark:border-zinc-800 p-3 flex gap-2"
+        >
+          <input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            disabled={isLoading}
+            placeholder={isLoading ? "답하는 중…" : "질문을 입력..."}
+            className="flex-1 rounded-full border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 px-4 py-2 text-sm outline-none focus:border-zinc-500 disabled:opacity-50"
+          />
+          <button
+            type="submit"
+            disabled={!input.trim() || isLoading}
+            className="rounded-full bg-zinc-900 dark:bg-white text-white dark:text-black px-4 py-2 text-sm disabled:opacity-40"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
+            전송
+          </button>
+        </form>
       </main>
     </div>
   );
