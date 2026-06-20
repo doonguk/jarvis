@@ -37,13 +37,13 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
+  async function handleSubmit(formEvent: React.FormEvent) {
+    formEvent.preventDefault();
     const text = input.trim();
     if (!text || isLoading) return;
 
-    // 1) 새 user 메시지를 포함한 다음 상태를 미리 만든다.
-    //    setState는 비동기라서 fetch 바디에 그대로 쓰면 안 됨 (stale).
+    // setState는 비동기라 fetch 바디에 messages 그대로 쓰면 stale.
+    // 새 user 메시지를 포함한 다음 상태를 미리 만들어 fetch에 전달.
     const nextMessages: Message[] = [
       ...messages,
       { role: "user", content: text },
@@ -54,20 +54,90 @@ export default function Home() {
     setError(null);
 
     try {
-      const res = await fetch("/api/chat", {
+      const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: nextMessages }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error ?? `HTTP ${res.status}`);
 
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: data.text ?? "" },
-      ]);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "unknown error");
+      // 스트림 시작 전 에러 (4xx/5xx): 일반 JSON 응답으로 처리
+      if (!response.ok) {
+        const errorBody = await response.json().catch(() => ({}));
+        throw new Error(errorBody?.error ?? `HTTP ${response.status}`);
+      }
+      if (!response.body) {
+        throw new Error("응답 body 없음 — 스트림 불가");
+      }
+
+      // SSE 청크 소비 (Block 14).
+      // - 청크 경계와 SSE 메시지 경계는 다름. 1 청크에 여러 메시지가 올 수도, 1 메시지가 두 청크에 걸칠 수도 있음
+      // - 버퍼에 누적 → "\n\n"로 split → 마지막은 미완성일 수 있으니 buffer에 남김
+      // - 각 라인이 "data: {...}" 형태면 JSON 파싱 후 type별 분기
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let assistantStarted = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split("\n\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+
+          let payload: {
+            type: "token" | "done" | "error";
+            content?: string;
+            error?: string;
+            usage?: unknown;
+            rag?: unknown;
+          };
+          try {
+            payload = JSON.parse(line.slice(6));
+          } catch {
+            // 깨진 라인은 무시 (방어). 정상 케이스에선 안 일어남.
+            continue;
+          }
+
+          if (payload.type === "token" && typeof payload.content === "string") {
+            const tokenContent = payload.content;
+            if (!assistantStarted) {
+              // 첫 토큰 도착: spinner 끄고 assistant 메시지 push.
+              // 이후 토큰은 마지막 메시지에 append.
+              assistantStarted = true;
+              setIsLoading(false);
+              setMessages((previous) => [
+                ...previous,
+                { role: "assistant", content: tokenContent },
+              ]);
+            } else {
+              setMessages((previous) => {
+                const lastMessage = previous[previous.length - 1];
+                if (!lastMessage || lastMessage.role !== "assistant") {
+                  return previous;
+                }
+                return [
+                  ...previous.slice(0, -1),
+                  { ...lastMessage, content: lastMessage.content + tokenContent },
+                ];
+              });
+            }
+          } else if (payload.type === "done") {
+            // usage/rag는 dev 디버그용. 4주차 데모에서 UI 통합 검토.
+            console.log("[/api/chat] usage:", payload.usage);
+            console.log("[/api/chat] rag:", payload.rag);
+          } else if (payload.type === "error") {
+            // 스트림 도중 에러: 받은 부분 응답은 그대로 두고 에러만 표시.
+            throw new Error(payload.error ?? "unknown stream error");
+          }
+        }
+      }
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "unknown error");
     } finally {
       setIsLoading(false);
     }
