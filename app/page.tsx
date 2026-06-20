@@ -1,9 +1,35 @@
 "use client";
 
-import { useState } from "react";
+import { useState, Fragment } from "react";
 
 type Role = "user" | "assistant";
 type Message = { role: Role; content: string };
+
+/**
+ * assistant 답변 안의 [[페이지명]] 인용을 시각적으로 강조해서 렌더링.
+ *
+ * 동작: 텍스트를 정규식으로 split → 일반 텍스트는 그대로, [[...]] 부분만 span으로 박스 처리.
+ * 클릭은 안 받음 — Obsidian wiki 링크는 브라우저에서 열 수 없고, 본인 로컬 vault에서만 의미 있음.
+ * 시각 강조만으로 "여기가 출처 인용이다"를 빠르게 인식 가능.
+ *
+ * user 메시지엔 적용 안 함 — 사용자가 친 [[X]]는 그냥 텍스트로 둠.
+ */
+function renderMessageWithCitations(content: string) {
+  const parts = content.split(/(\[\[[^\]]+\]\])/g);
+  return parts.map((part, index) => {
+    if (/^\[\[[^\]]+\]\]$/.test(part)) {
+      return (
+        <span
+          key={index}
+          className="font-mono text-xs px-1.5 py-0.5 mx-0.5 rounded bg-blue-100 text-blue-800 dark:bg-blue-950 dark:text-blue-300"
+        >
+          {part}
+        </span>
+      );
+    }
+    return <Fragment key={index}>{part}</Fragment>;
+  });
+}
 
 export default function Home() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -77,7 +103,9 @@ export default function Home() {
                     : "bg-zinc-200 text-black dark:bg-zinc-800 dark:text-white")
                 }
               >
-                {m.content}
+                {m.role === "assistant"
+                  ? renderMessageWithCitations(m.content)
+                  : m.content}
               </div>
             </div>
           ))}
