@@ -50,7 +50,13 @@ export type FetchOptions = {
   query?: string;
   /** points 최소값. 기본 50 (저품질 컷) */
   minimumPoints?: number;
-  /** 응답 최대 hits. 기본 30 */
+  /**
+   * 응답 최대 hits. 기본 30.
+   *
+   * 운영 컨텍스트(Block 18 cron 큐레이션) 기준. 디버그 라우트
+   * (`/api/debug/curate-summarize`)는 LLM 비용 절약 위해 명시적으로 10 박음.
+   * 디폴트가 layer별로 다른 이유: 각 layer의 주된 호출자 의도를 반영.
+   */
   maximumHits?: number;
   /** 최근 N일만. 기본 7. 매일 큐레이션 → 1주 윈도우 안에서 신선한 거 우선 */
   withinDays?: number;
