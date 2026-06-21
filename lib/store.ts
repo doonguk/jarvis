@@ -49,3 +49,23 @@ async function buildIndex(): Promise<IndexedDocument[]> {
   );
   return docs.map((d, i) => ({ ...d, vector: vectors[i] }));
 }
+
+/**
+ * Block 19 — 인덱스 무효화.
+ *
+ * 캐시된 인덱스를 비워서 다음 getIndex() 호출이 cold-start로 전체 재빌드 트리거.
+ *
+ * 정책 결정 (Day 3, 증분 임베딩 대신 전체 재빌드 선택):
+ * - 증분은 prod 재시작/HMR 시 휘발 → 어차피 cold-start 로직 필요 → 두 경로 유지 부담
+ * - 증분은 부분 상태 노출 위험 (큐레이션 중 chat 끼어들면 미완성 인덱스 봄)
+ * - wiki 작아서 (~11 파일) 전체 재빌드 비용 ~$0.0001 + 3~5초. 절약 이득 없음
+ *
+ * 호출 시점: 큐레이션 write 끝난 직후 (디스크 ↔ 인덱스 동기화 시점).
+ * 호출 후 즉시 재빌드 X — lazy. 다음 chat 첫 호출이 cold-start (3~5초).
+ *
+ * 동시성: 호출 순간 진행 중인 검색은 이미 받은 index 그대로 씀.
+ * 새 검색만 새 index 봄. 안전.
+ */
+export function invalidateIndex(): void {
+  globalThis.__INDEX = undefined;
+}

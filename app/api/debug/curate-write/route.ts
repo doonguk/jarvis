@@ -1,6 +1,7 @@
 import { fetchHackerNewsStories } from "@/lib/curate/hn";
 import { summarizeStories } from "@/lib/curate/summarize";
 import { writeCuratedFile } from "@/lib/curate/writer";
+import { invalidateIndex } from "@/lib/store";
 
 /**
  * Block 17 검증용. 운영 라우트 아님 (운영은 Block 18 /api/curate).
@@ -32,11 +33,13 @@ export async function GET(request: Request) {
 
     const summarizedStories = await summarizeStories(fetchedStories);
     const writeResult = await writeCuratedFile(summarizedStories);
+    invalidateIndex();
 
     return Response.json({
       fetched: fetchedStories.length,
       summarized: summarizedStories.length,
       ...writeResult,
+      indexInvalidated: true,
     });
   } catch (error) {
     return Response.json(

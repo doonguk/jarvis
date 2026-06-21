@@ -1,6 +1,7 @@
 import { fetchHackerNewsStories } from "@/lib/curate/hn";
 import { summarizeStories } from "@/lib/curate/summarize";
 import { writeCuratedFile } from "@/lib/curate/writer";
+import { invalidateIndex } from "@/lib/store";
 
 /**
  * Block 18 — 운영 큐레이션 트리거 (수동).
@@ -41,10 +42,17 @@ export async function POST(request: Request) {
     const summarizedStories = await summarizeStories(fetchedStories);
     const writeResult = await writeCuratedFile(summarizedStories);
 
+    /**
+     * Block 19 — write 끝나면 인덱스 무효화.
+     * 다음 chat 호출이 cold-start로 wiki 전체 재빌드 → 새 curated 파일이 검색에 즉시 반영.
+     */
+    invalidateIndex();
+
     return Response.json({
       fetched: fetchedStories.length,
       summarized: summarizedStories.length,
       ...writeResult,
+      indexInvalidated: true,
     });
   } catch (error) {
     console.error("[/api/curate] error:", error);
