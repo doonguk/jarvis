@@ -2,12 +2,15 @@
 // 전제: 별도 터미널에서 `pnpm dev` (Next dev 서버)가 localhost:3000 으로 떠 있어야 함.
 // 본 프로세스는 BrowserWindow 만 띄워서 그 URL 을 로드한다.
 
-const { app, BrowserWindow, globalShortcut } = require('electron');
+const { app, BrowserWindow, Menu, Tray, globalShortcut, nativeImage } = require('electron');
+const path = require('path');
 
 const DEV_SERVER_URL = process.env.JARVIS_DEV_URL || 'http://localhost:3000';
 const TOGGLE_ACCELERATOR = 'CommandOrControl+Shift+Space';
+const TRAY_ICON_PATH = path.join(__dirname, 'assets', 'tray-iconTemplate.png');
 
 let mainWindow = null;
+let tray = null;
 let isQuitting = false;
 
 function createMainWindow() {
@@ -68,6 +71,36 @@ function toggleMainWindow() {
   }
 }
 
+function createTray() {
+  const trayImage = nativeImage.createFromPath(TRAY_ICON_PATH);
+  // 안전망: 위 PNG 가 비어 있어도 Tray 생성 자체는 실패 안 함. 빈 아이콘은 시각적으로만 안 보임.
+  tray = new Tray(trayImage);
+  tray.setToolTip('Jarvis (⌘⇧Space)');
+
+  const contextMenu = Menu.buildFromTemplate([
+    {
+      label: '열기 / 숨기기',
+      accelerator: TOGGLE_ACCELERATOR,
+      click: toggleMainWindow,
+    },
+    { type: 'separator' },
+    {
+      label: '종료',
+      accelerator: 'CommandOrControl+Q',
+      click: () => {
+        isQuitting = true;
+        app.quit();
+      },
+    },
+  ]);
+
+  // macOS 컨벤션: 좌클릭은 토글, 우클릭은 메뉴
+  tray.on('click', toggleMainWindow);
+  tray.on('right-click', () => {
+    tray.popUpContextMenu(contextMenu);
+  });
+}
+
 function registerToggleShortcut() {
   const registered = globalShortcut.register(TOGGLE_ACCELERATOR, toggleMainWindow);
   if (!registered) {
@@ -80,11 +113,18 @@ function registerToggleShortcut() {
 }
 
 app.whenReady().then(() => {
+  // 메뉴바 상주(LSUIElement) 모델: dock 아이콘 숨기고 tray 만 진입로로 둠.
+  // 끄고 싶으면 환경변수 JARVIS_KEEP_DOCK=1.
+  if (process.platform === 'darwin' && app.dock && !process.env.JARVIS_KEEP_DOCK) {
+    app.dock.hide();
+  }
+
   createMainWindow();
+  createTray();
   registerToggleShortcut();
 
   app.on('activate', () => {
-    // macOS: dock 아이콘 클릭 시 창 없으면 새로 띄움
+    // macOS: dock 숨김 모드여도 tray 클릭/단축키로 다시 띄울 수 있음.
     if (BrowserWindow.getAllWindows().length === 0) {
       createMainWindow();
     } else if (mainWindow) {
