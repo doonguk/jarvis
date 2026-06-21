@@ -30,19 +30,24 @@ export function cosine(a: number[], b: number[]): number {
 /**
  * source 가중치 (스펙 v3.1 §3 Day 2).
  *
- * 같은 코사인 점수라도 내가 직접 쓴 manual이 외부 복붙 curated보다
- * 위로 올라오게 점수(스칼라)에 곱한다. curated가 manual을 이기려면
- * 유사도 격차가 0.6 핸디캡을 극복할 만큼 커야 함.
+ * 원래 도입 동기: "내 손글 manual이 외부 큐레이션 curated보다 우선" 직관.
+ * curated × 0.6 핸디캡으로 유사도 격차가 작아도 manual이 위로 오게 함.
  *
- * 주의: 벡터 자체에 곱하면 방향이 안 바뀌어 코사인 결과가 동일 — 의미 없음.
- * 반드시 cosine 결과(스칼라)에 곱한다.
+ * **Block 20 (2026-06-21) 측정 결과 — 가중치 폐기 결정:**
+ * - 5 baseline 쿼리: 가중치 효과 0 (curated 애초에 top-3 미진입)
+ * - 1 curated 매칭 쿼리("Linear A 해독 AI"): rawScore 0.4659 매우 강한 매칭이
+ *   × 0.6 = 0.2796으로 밀려 무관한 manual learn 노트들에 top-1 자리 빼앗김.
+ * - 손익: "맞춰주는 케이스 0건 + 망치는 케이스 1건" → 명백한 마이너스.
+ * → 1.0 통일로 가중치 무력화.
  *
- * 이 수치(1.0/0.6)는 측정 없이 박은 직관값. Block 9에서 raw vs weighted
- * top-K를 비교해 효과 없으면 빼거나 조정한다.
+ * weighted 옵션 자체는 코드 호환성 위해 유지 (효과 0). 1주차에 가중치 로직
+ * 자체 제거 또는 다른 기준(시간 가중치, 메타 가중치 등)으로 재설계.
+ *
+ * 자세한 측정 데이터: [[RAG-Day1-baseline-평가]] Day 3 섹션.
  */
 export const SOURCE_WEIGHT: Record<Source, number> = {
   manual: 1.0,
-  curated: 0.6,
+  curated: 1.0,
 };
 
 export type SearchHit = {
