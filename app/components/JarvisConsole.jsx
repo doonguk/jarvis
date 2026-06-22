@@ -214,6 +214,13 @@ export default function JarvisConsole() {
   const audioStreamRef = useRef(null);
   const recordingCancelledRef = useRef(false);
 
+  // Block 27 — TTS (Web Speech) refs.
+  // 토큰을 문장 단위로 묶어서 utterance 로 queue. ttsQueueRef = 아직 utterance 안 박힌 누적,
+  // ttsVoiceRef = 선택된 voice(한국어 우선), ttsPollIntervalRef = speechSynthesis 끝남 감지.
+  const ttsQueueRef = useRef('');
+  const ttsVoiceRef = useRef(null);
+  const ttsPollIntervalRef = useRef(null);
+
   const clearTimers = useCallback(() => {
     timers.current.forEach(clearTimeout);
     timers.current = [];
@@ -310,6 +317,7 @@ export default function JarvisConsole() {
               setCite({
                 page: formatWikiPath(topHit.path),
                 score: typeof topHit.score === 'number' ? topHit.score.toFixed(2) : '',
+                path: topHit.path, // Block 28 — 칩 클릭 시 Obsidian URI 에 박힐 원본 경로
               });
             }
             setStreaming(false);
@@ -350,9 +358,98 @@ export default function JarvisConsole() {
     }
   }, []);
 
+  // Block 27 — TTS 헬퍼들.
+  // pickVoice: 마운트 시 voice 한 번 + 'voiceschanged' 이벤트(macOS 가 비동기 로드).
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+    function pickVoice() {
+      const voices = window.speechSynthesis.getVoices();
+      if (!voices || voices.length === 0) return;
+      // 한국어 우선, 그 다음 영어, 마지막 fallback 첫 번째.
+      const koreanVoice = voices.find((voice) => voice.lang?.toLowerCase().startsWith('ko'));
+      const englishVoice = voices.find((voice) => voice.lang?.toLowerCase().startsWith('en'));
+      ttsVoiceRef.current = koreanVoice ?? englishVoice ?? voices[0];
+    }
+    pickVoice();
+    window.speechSynthesis.onvoiceschanged = pickVoice;
+    return () => {
+      window.speechSynthesis.onvoiceschanged = null;
+    };
+  }, []);
+
+  const speakUtterance = useCallback((text) => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) return;
+    if (!text || !text.trim()) return;
+    const utterance = new SpeechSynthesisUtterance(text);
+    if (ttsVoiceRef.current) utterance.voice = ttsVoiceRef.current;
+    utterance.rate = 1.05;
+    utterance.pitch = 1.0;
+    window.speechSynthesis.speak(utterance);
+  }, []);
+
+  // 토큰 chunk 가 도착할 때 호출. ttsQueueRef 에 누적하다가 문장 끝 만나면 utterance enqueue.
+  const enqueueTokenForTts = useCallback((chunk) => {
+    if (!chunk) return;
+    ttsQueueRef.current += chunk;
+    // 한국어/영어 문장 끝 부호 포함. 줄바꿈도 분할 트리거.
+    const SENTENCE_END = /[.!?。！？\n]/;
+    if (SENTENCE_END.test(chunk)) {
+      const buffered = ttsQueueRef.current;
+      ttsQueueRef.current = '';
+      speakUtterance(buffered);
+    }
+  }, [speakUtterance]);
+
+  // done 청크 도착 시 남은 버퍼를 마저 enqueue.
+  const flushTtsQueue = useCallback(() => {
+    if (ttsQueueRef.current) {
+      const remaining = ttsQueueRef.current;
+      ttsQueueRef.current = '';
+      speakUtterance(remaining);
+    }
+  }, [speakUtterance]);
+
+  // 진행 중인 TTS 전부 정지 + 큐 비움. exitVoice / 새 enterVoice 시 호출.
+  const cancelTts = useCallback(() => {
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.cancel();
+    }
+    ttsQueueRef.current = '';
+    if (ttsPollIntervalRef.current) {
+      clearInterval(ttsPollIntervalRef.current);
+      ttsPollIntervalRef.current = null;
+    }
+  }, []);
+
+  // 200ms 폴링 — speechSynthesis 가 다 읽으면 phase='answer' 로 dock.
+  // 안전망: 60s 후 강제 종료 (응답 길어도 그 안에 끝나야).
+  const waitForTtsCompletion = useCallback(() => {
+    if (typeof window === 'undefined' || !window.speechSynthesis) {
+      setPhase('answer');
+      setVoice('idle');
+      return;
+    }
+    if (ttsPollIntervalRef.current) {
+      clearInterval(ttsPollIntervalRef.current);
+    }
+    const startedAt = Date.now();
+    ttsPollIntervalRef.current = setInterval(() => {
+      const stillSpeaking =
+        window.speechSynthesis.speaking || window.speechSynthesis.pending;
+      const timedOut = Date.now() - startedAt > 60000;
+      if (!stillSpeaking || timedOut) {
+        clearInterval(ttsPollIntervalRef.current);
+        ttsPollIntervalRef.current = null;
+        setPhase('answer');
+        setVoice('idle');
+      }
+    }, 200);
+  }, []);
+
   const enterVoice = useCallback(async () => {
     if (busyVoice()) return;
     clearTimers();
+    cancelTts(); // Block 27 — 이전 답변 음성 진행 중이면 정지
     setSrc('voice');
     setQuestion('');
     setAnswer('');
@@ -446,12 +543,14 @@ export default function JarvisConsole() {
               if (payload.type === 'token' && typeof payload.content === 'string') {
                 if (!assistantStarted) {
                   assistantStarted = true;
-                  // TTS (Block 27) 박힐 자리. 지금은 첫 토큰부터 answer phase.
-                  setPhase('answer');
-                  setVoice('idle');
+                  // Block 27 — 음성 모드는 phase='v_speaking' 유지 (답변 본문 안 보이고 "음성 응답 중" 박스).
+                  // TTS 끝나면 폴링이 phase='answer' 로 dock.
+                  setPhase('v_speaking');
+                  setVoice('speaking');
                   setStreaming(true);
                 }
                 setAnswer((previous) => previous + payload.content);
+                enqueueTokenForTts(payload.content);
               } else if (payload.type === 'done') {
                 const hits = payload.rag?.hits;
                 if (Array.isArray(hits) && hits.length > 0) {
@@ -463,6 +562,9 @@ export default function JarvisConsole() {
                 }
                 setStreaming(false);
                 setShowCite(true);
+                // 남은 토큰 버퍼를 마저 utterance enqueue. 그리고 speechSynthesis 끝남 폴링 시작.
+                flushTtsQueue();
+                waitForTtsCompletion();
               } else if (payload.type === 'error') {
                 throw new Error(payload.error ?? 'unknown stream error');
               }
@@ -484,7 +586,15 @@ export default function JarvisConsole() {
       setVoice('idle');
       setAnswer(`(마이크 에러) ${error instanceof Error ? error.message : 'unknown'}`);
     }
-  }, [busyVoice, clearTimers, stopMicrophoneStream]);
+  }, [
+    busyVoice,
+    clearTimers,
+    stopMicrophoneStream,
+    cancelTts,
+    enqueueTokenForTts,
+    flushTtsQueue,
+    waitForTtsCompletion,
+  ]);
 
   const finishRecording = useCallback(() => {
     const recorder = mediaRecorderRef.current;
@@ -495,18 +605,19 @@ export default function JarvisConsole() {
   }, []);
 
   const exitVoice = useCallback(() => {
-    // ESC 또는 명시 취소: recording 폐기 + 답변 없음.
+    // ESC 또는 명시 취소: recording 폐기 + TTS 정지 + 답변 없음.
     recordingCancelledRef.current = true;
     const recorder = mediaRecorderRef.current;
     if (recorder && recorder.state === 'recording') {
       recorder.stop();
     }
     stopMicrophoneStream();
+    cancelTts();
     clearTimers();
     setStreaming(false);
     setVoice('idle');
     setPhase((p) => (answer ? 'answer' : 'empty'));
-  }, [answer, clearTimers, stopMicrophoneStream]);
+  }, [answer, clearTimers, stopMicrophoneStream, cancelTts]);
 
   // ⌘⇧Space toggle + ESC (Electron 메인 globalShortcut → Block 29 에서 IPC 합칠 거).
   // Block 26 — 토글 의미:
@@ -650,7 +761,25 @@ export default function JarvisConsole() {
                 {showCite && (
                   <div className="flex flex-wrap items-center gap-2.5 pt-1">
                     <span className="font-[IBM_Plex_Mono,monospace] text-[11px] tracking-[.14em] text-[#5d6e82]">근거</span>
-                    <button className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-[#3ee9e0]/[.32] bg-[#3ee9e0]/10 px-[13px] py-1.5 font-[IBM_Plex_Mono,monospace] text-[13.5px] text-[#7ef0e9]">
+                    <button
+                      onClick={async () => {
+                        // Block 28 — Electron 환경이면 Obsidian 으로 열기. 아니면 noop.
+                        if (typeof window === 'undefined' || !window.electronAPI?.openWikiPage) {
+                          console.warn('Electron API not available — wiki open skipped');
+                          return;
+                        }
+                        if (!cite.path) {
+                          console.warn('cite.path missing — wiki open skipped');
+                          return;
+                        }
+                        const result = await window.electronAPI.openWikiPage(cite.path);
+                        if (!result?.ok) {
+                          console.warn('open-wiki-page failed:', result?.error);
+                        }
+                      }}
+                      title={cite.path ? `Obsidian 에서 ${cite.path} 열기` : '경로 없음'}
+                      className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-[#3ee9e0]/[.32] bg-[#3ee9e0]/10 px-[13px] py-1.5 font-[IBM_Plex_Mono,monospace] text-[13.5px] text-[#7ef0e9] hover:bg-[#3ee9e0]/20"
+                    >
                       <span className="h-[5px] w-[5px] rounded-full bg-[#3ee9e0] shadow-[0_0_8px_#3ee9e0]" />
                       {cite.page}
                     </button>

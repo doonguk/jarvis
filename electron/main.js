@@ -2,12 +2,34 @@
 // 전제: 별도 터미널에서 `pnpm dev` (Next dev 서버)가 localhost:3000 으로 떠 있어야 함.
 // 본 프로세스는 BrowserWindow 만 띄워서 그 URL 을 로드한다.
 
-const { app, BrowserWindow, Menu, Tray, globalShortcut, nativeImage, session } = require('electron');
+const { app, BrowserWindow, Menu, Tray, globalShortcut, ipcMain, nativeImage, session, shell } = require('electron');
 const path = require('path');
+const fs = require('fs');
+
+// .env.local 단순 로더 — Next dev 서버 는 자체 로드하지만 Electron 메인 프로세스는 별도.
+// dotenv 의존성 추가 회피용 최소 파서. 박힌 키만 process.env 에 박음.
+function loadEnvFromFile(envFilePath) {
+  try {
+    const content = fs.readFileSync(envFilePath, 'utf8');
+    content.split('\n').forEach((line) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) return;
+      const equalsIndex = trimmed.indexOf('=');
+      if (equalsIndex < 0) return;
+      const key = trimmed.slice(0, equalsIndex).trim();
+      const value = trimmed.slice(equalsIndex + 1).trim().replace(/^["']|["']$/g, '');
+      if (!process.env[key]) process.env[key] = value;
+    });
+  } catch (loadError) {
+    console.warn(`[jarvis] env file not loaded (${envFilePath}):`, loadError.message);
+  }
+}
+loadEnvFromFile(path.join(__dirname, '..', '.env.local'));
 
 const DEV_SERVER_URL = process.env.JARVIS_DEV_URL || 'http://localhost:3000';
 const TOGGLE_ACCELERATOR = 'CommandOrControl+Shift+Space';
 const TRAY_ICON_PATH = path.join(__dirname, 'assets', 'tray-iconTemplate.png');
+const PRELOAD_PATH = path.join(__dirname, 'preload.js');
 
 let mainWindow = null;
 let tray = null;
@@ -26,6 +48,7 @@ function createMainWindow() {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
+      preload: PRELOAD_PATH,
     },
   });
 
@@ -130,6 +153,30 @@ app.whenReady().then(() => {
       return;
     }
     callback(false);
+  });
+
+  // Block 28 — 인용 칩 클릭 → Obsidian 페이지 열기.
+  // renderer 가 ipcRenderer.invoke('open-wiki-page', relativePath) 호출 → 메인이 URI 생성 + shell.openExternal.
+  // OBSIDIAN_VAULT_NAME env 박혀 있어야 함. 없으면 에러 반환 (renderer 에서 console.warn).
+  ipcMain.handle('open-wiki-page', async (_event, relativePath) => {
+    const vaultName = process.env.OBSIDIAN_VAULT_NAME;
+    if (!vaultName) {
+      return { ok: false, error: 'OBSIDIAN_VAULT_NAME 환경변수 미설정' };
+    }
+    if (!relativePath || typeof relativePath !== 'string') {
+      return { ok: false, error: 'invalid path' };
+    }
+    // Obsidian URI 는 vault 이름 + vault root 기준 file path (확장자 옵션).
+    // lib/wiki.ts 가 박은 path = wiki root 기준 (vault root 와 동일 가정 — README 에 명시).
+    const obsidianUri =
+      `obsidian://open?vault=${encodeURIComponent(vaultName)}` +
+      `&file=${encodeURIComponent(relativePath)}`;
+    try {
+      await shell.openExternal(obsidianUri);
+      return { ok: true };
+    } catch (openError) {
+      return { ok: false, error: openError.message };
+    }
   });
 
   createMainWindow();
