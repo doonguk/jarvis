@@ -2,7 +2,7 @@
 // 전제: 별도 터미널에서 `pnpm dev` (Next dev 서버)가 localhost:3000 으로 떠 있어야 함.
 // 본 프로세스는 BrowserWindow 만 띄워서 그 URL 을 로드한다.
 
-const { app, BrowserWindow, Menu, Tray, globalShortcut, nativeImage } = require('electron');
+const { app, BrowserWindow, Menu, Tray, globalShortcut, nativeImage, session } = require('electron');
 const path = require('path');
 
 const DEV_SERVER_URL = process.env.JARVIS_DEV_URL || 'http://localhost:3000';
@@ -120,6 +120,17 @@ app.whenReady().then(() => {
   if (process.platform === 'darwin' && app.dock && !process.env.JARVIS_KEEP_DOCK) {
     app.dock.hide();
   }
+
+  // Block 26 — Whisper STT 위해 마이크 권한 자동 허용.
+  // 'media' 권한은 navigator.mediaDevices.getUserMedia 호출 시 발동. callback(true) 박으면
+  // Electron 단에서는 허용, 그 후 macOS 시스템 모달이 첫 1회 사용자 확인 받음.
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    if (permission === 'media') {
+      callback(true);
+      return;
+    }
+    callback(false);
+  });
 
   createMainWindow();
   createTray();

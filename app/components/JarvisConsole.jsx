@@ -24,15 +24,8 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 const HUES = { idle: '#7b8fa5', listening: '#3ee9e0', thinking: '#9682f5', speaking: '#f5b25a' };
 const LABELS = { idle: 'READY', listening: 'LISTENING', thinking: 'THINKING', speaking: 'SPEAKING' };
 
-const A_VOICE =
-  '위키의 STT/Whisper-설정 노트 기준, 설정에서 음성, 모델 순서로 들어가면 바꿀 수 있어요. ' +
-  '현재 기본 모델은 small.en 이고, 영어 위주면 그대로 두는 걸 추천해요. ' +
-  '한국어 받아쓰기 정확도가 필요하면 large-v3 로 올리되 GPU 메모리를 더 쓴다는 점만 감안하세요.';
-const A_RAG =
-  '질문이 들어오면 임베딩해 둔 Obsidian 위키 인덱스에서 의미가 가까운 노트를 먼저 찾고, 그 본문을 컨텍스트로 넣어 답을 생성합니다. ' +
-  '청크는 512토큰에 64토큰 오버랩으로 잘랐고, 검색은 코사인 유사도 상위 6개를 가져온 뒤 재정렬해 상위 3개만 프롬프트에 넣어요. ' +
-  '근거가 된 노트는 항상 인용으로 함께 노출해서, 답이 어디서 나왔는지 추적할 수 있게 했습니다.';
-const Q_VOICE = 'Whisper STT 설정 어디서 바꾸지?';
+// 데모 상수(A_VOICE/A_RAG/Q_VOICE) 는 Block 25 (LLM) + Block 26 (Whisper) 실연결 후 제거.
+// 시안의 reveal 타이밍 시연용이었음.
 
 /**
  * wiki path → 화면 표시용 라벨.
@@ -214,6 +207,13 @@ export default function JarvisConsole() {
   const revealIv = useRef(null);
   const canvasRef = useOrb(voice);
 
+  // Block 26 — Whisper recording refs.
+  // MediaRecorder 인스턴스, 모이는 audio chunk 배열, 마이크 stream, 취소 플래그.
+  const mediaRecorderRef = useRef(null);
+  const audioChunksRef = useRef([]);
+  const audioStreamRef = useRef(null);
+  const recordingCancelledRef = useRef(false);
+
   const clearTimers = useCallback(() => {
     timers.current.forEach(clearTimeout);
     timers.current = [];
@@ -330,46 +330,206 @@ export default function JarvisConsole() {
     }
   }, [clearTimers]);
 
-  const enterVoice = useCallback(() => {
+  /**
+   * Block 26 — Whisper 실연결.
+   *
+   * 흐름:
+   *   1) enterVoice — 마이크 권한 받고 MediaRecorder 시작. phase = v_listening.
+   *   2) 사용자가 다시 트리거(마이크 버튼/⌘⇧Space) → finishRecording → MediaRecorder.stop()
+   *   3) onstop 안: audio blob → /api/transcribe → text → setTranscript
+   *      → /api/chat 호출 (Block 25 패턴 재사용) → 토큰 누적 + cite 매핑
+   *   4) ESC = exitVoice (취소, transcribe 안 함, recording 폐기)
+   *
+   * TTS (Block 27 자리): 첫 토큰 도착 시 phase='answer' 로 박힘. Block 27 에서
+   * 첫 토큰 즈음 phase='v_speaking' + TTS 재생 박을 거.
+   */
+  const stopMicrophoneStream = useCallback(() => {
+    if (audioStreamRef.current) {
+      audioStreamRef.current.getTracks().forEach((track) => track.stop());
+      audioStreamRef.current = null;
+    }
+  }, []);
+
+  const enterVoice = useCallback(async () => {
     if (busyVoice()) return;
     clearTimers();
-    setSrc('voice'); setQuestion(Q_VOICE); setAnswer(''); setShowCite(false);
-    setPhase('v_listening'); setVoice('listening');
-    reveal(setTranscript, Q_VOICE, 42, () => {
-      t(() => {
-        setPhase('v_thinking'); setVoice('thinking');
-        t(() => {
-          setPhase('v_speaking'); setVoice('speaking');
-          setCite({ page: 'STT/Whisper-설정', score: '0.92' });
-          const dur = Math.min(A_VOICE.length * 42, 6500);
-          t(() => {
-            setAnswer(A_VOICE); setStreaming(false); setShowCite(true);
-            setPhase('answer'); setVoice('idle');
-          }, dur);
-        }, 1600);
-      }, 600);
-    });
-  }, [busyVoice, clearTimers, reveal]);
+    setSrc('voice');
+    setQuestion('');
+    setAnswer('');
+    setShowCite(false);
+    setCite({});
+    setTranscript('');
+    setPhase('v_listening');
+    setVoice('listening');
+    recordingCancelledRef.current = false;
+
+    try {
+      const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioStreamRef.current = audioStream;
+      const mediaRecorder = new MediaRecorder(audioStream);
+      mediaRecorderRef.current = mediaRecorder;
+      audioChunksRef.current = [];
+
+      mediaRecorder.ondataavailable = (chunkEvent) => {
+        if (chunkEvent.data && chunkEvent.data.size > 0) {
+          audioChunksRef.current.push(chunkEvent.data);
+        }
+      };
+
+      mediaRecorder.onstop = async () => {
+        stopMicrophoneStream();
+        if (recordingCancelledRef.current) {
+          audioChunksRef.current = [];
+          return;
+        }
+        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+        audioChunksRef.current = [];
+
+        setPhase('v_thinking');
+        setVoice('thinking');
+
+        try {
+          // 1) STT
+          const formData = new FormData();
+          formData.append('audio', audioBlob, 'recording.webm');
+          const transcribeResponse = await fetch('/api/transcribe', {
+            method: 'POST',
+            body: formData,
+          });
+          if (!transcribeResponse.ok) {
+            const errorBody = await transcribeResponse.json().catch(() => ({}));
+            throw new Error(errorBody?.error ?? `transcribe HTTP ${transcribeResponse.status}`);
+          }
+          const transcribeData = await transcribeResponse.json();
+          const recognisedText = transcribeData.text?.trim();
+          if (!recognisedText) {
+            throw new Error('인식된 텍스트 없음 (무음?)');
+          }
+          setQuestion(recognisedText);
+          setTranscript(recognisedText);
+
+          // 2) LLM (Block 25 패턴 재사용)
+          const chatResponse = await fetch('/api/chat', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ messages: [{ role: 'user', content: recognisedText }] }),
+          });
+          if (!chatResponse.ok) {
+            const errorBody = await chatResponse.json().catch(() => ({}));
+            throw new Error(errorBody?.error ?? `chat HTTP ${chatResponse.status}`);
+          }
+          if (!chatResponse.body) {
+            throw new Error('chat 응답 body 없음');
+          }
+
+          const reader = chatResponse.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+          let assistantStarted = false;
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n\n');
+            buffer = lines.pop() ?? '';
+
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue;
+              let payload;
+              try {
+                payload = JSON.parse(line.slice(6));
+              } catch {
+                continue;
+              }
+
+              if (payload.type === 'token' && typeof payload.content === 'string') {
+                if (!assistantStarted) {
+                  assistantStarted = true;
+                  // TTS (Block 27) 박힐 자리. 지금은 첫 토큰부터 answer phase.
+                  setPhase('answer');
+                  setVoice('idle');
+                  setStreaming(true);
+                }
+                setAnswer((previous) => previous + payload.content);
+              } else if (payload.type === 'done') {
+                const hits = payload.rag?.hits;
+                if (Array.isArray(hits) && hits.length > 0) {
+                  const topHit = hits[0];
+                  setCite({
+                    page: formatWikiPath(topHit.path),
+                    score: typeof topHit.score === 'number' ? topHit.score.toFixed(2) : '',
+                  });
+                }
+                setStreaming(false);
+                setShowCite(true);
+              } else if (payload.type === 'error') {
+                throw new Error(payload.error ?? 'unknown stream error');
+              }
+            }
+          }
+        } catch (error) {
+          setStreaming(false);
+          setShowCite(false);
+          setPhase('answer');
+          setVoice('idle');
+          setAnswer(`(에러) ${error instanceof Error ? error.message : 'unknown'}`);
+        }
+      };
+
+      mediaRecorder.start();
+    } catch (error) {
+      stopMicrophoneStream();
+      setPhase('answer');
+      setVoice('idle');
+      setAnswer(`(마이크 에러) ${error instanceof Error ? error.message : 'unknown'}`);
+    }
+  }, [busyVoice, clearTimers, stopMicrophoneStream]);
+
+  const finishRecording = useCallback(() => {
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state === 'recording') {
+      recordingCancelledRef.current = false;
+      recorder.stop();
+    }
+  }, []);
 
   const exitVoice = useCallback(() => {
+    // ESC 또는 명시 취소: recording 폐기 + 답변 없음.
+    recordingCancelledRef.current = true;
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state === 'recording') {
+      recorder.stop();
+    }
+    stopMicrophoneStream();
     clearTimers();
-    setStreaming(false); setVoice('idle');
+    setStreaming(false);
+    setVoice('idle');
     setPhase((p) => (answer ? 'answer' : 'empty'));
-  }, [answer, clearTimers]);
+  }, [answer, clearTimers, stopMicrophoneStream]);
 
-  // ⌘⇧Space toggle + ESC (Electron: 메인 globalShortcut → 이 콜백 호출로 대체 가능)
+  // ⌘⇧Space toggle + ESC (Electron 메인 globalShortcut → Block 29 에서 IPC 합칠 거).
+  // Block 26 — 토글 의미:
+  //   - v_listening 중 ⌘⇧Space: finishRecording (transcribe → LLM)
+  //   - thinking/speaking 중 ⌘⇧Space: 무시 (작업 끝까지 둠)
+  //   - idle ⌘⇧Space: enterVoice (recording 시작)
+  //   - ESC: 항상 exitVoice (취소, 폐기)
   useEffect(() => {
     const onKey = (e) => {
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.code === 'Space' || e.key === ' ')) {
         e.preventDefault();
-        busyVoice() ? exitVoice() : enterVoice();
+        if (phase === 'v_listening') {
+          finishRecording();
+        } else if (!busyVoice()) {
+          enterVoice();
+        }
       } else if (e.key === 'Escape' && busyVoice()) {
         exitVoice();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [busyVoice, enterVoice, exitVoice]);
+  }, [busyVoice, enterVoice, exitVoice, finishRecording, phase]);
 
   useEffect(() => () => clearTimers(), [clearTimers]);
 
@@ -521,9 +681,20 @@ export default function JarvisConsole() {
               />
               <span className="rounded-[5px] border border-[#233044] px-2 py-1 font-[IBM_Plex_Mono,monospace] text-[11px] text-[#5d6e82]">↵</span>
               <button
-                onClick={enterVoice}
-                title="음성 모드"
-                className="flex h-[42px] w-[42px] flex-none items-center justify-center rounded-[11px] border border-[#3ee9e0]/40 bg-[#3ee9e0]/[.12]"
+                onClick={() => {
+                  // Block 26 — 토글: 녹음 중이면 finish, 아니면 enter.
+                  if (phase === 'v_listening') {
+                    finishRecording();
+                  } else if (!busyVoice()) {
+                    enterVoice();
+                  }
+                }}
+                title={phase === 'v_listening' ? '녹음 정지 + 전송' : '음성 모드'}
+                className={`flex h-[42px] w-[42px] flex-none items-center justify-center rounded-[11px] border ${
+                  phase === 'v_listening'
+                    ? 'border-[#3ee9e0] bg-[#3ee9e0]/[.28] shadow-[0_0_18px_rgba(62,233,224,.4)]'
+                    : 'border-[#3ee9e0]/40 bg-[#3ee9e0]/[.12]'
+                }`}
               >
                 <span className="flex items-center gap-[2.5px]">
                   <span className="h-[9px] w-[3px] rounded-[2px] bg-[#3ee9e0]" />
