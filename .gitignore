@@ -46,3 +46,6 @@ next-env.d.ts
 /wiki-cache/
 /data/
 *.wiki-path
+
+# Claude Code local settings (per-machine)
+.claude/
