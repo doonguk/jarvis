@@ -15,10 +15,12 @@ let isQuitting = false;
 
 function createMainWindow() {
   mainWindow = new BrowserWindow({
-    width: 960,
-    height: 720,
-    minWidth: 640,
-    minHeight: 480,
+    // JarvisConsole 시안 박스가 1100×740 고정. 창은 여유 + p-10(40px) 패딩 고려해서 1280×900.
+    // minWidth/Height 도 박스가 안 잘리는 최소치로.
+    width: 1280,
+    height: 900,
+    minWidth: 1180,
+    minHeight: 820,
     title: 'Jarvis',
     show: false,
     webPreferences: {
