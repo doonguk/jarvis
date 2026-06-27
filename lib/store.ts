@@ -1,7 +1,26 @@
-import { Document, loadAllDocuments } from "./wiki";
+import { Document, loadAllDocuments, type Source } from "./wiki";
 import { embedBatch } from "./embed";
+import { chunkMarkdown, type Chunk } from "./chunk";
 
-export type IndexedDocument = Document & {
+/**
+ * 인덱스의 한 항목 = 문서가 아니라 "청크"(Block 34).
+ *
+ * 문서 메타(path/absPath/source) + 청크 메타(headingTrail/chunkIndex) + 벡터.
+ * 한 문서가 여러 IndexedChunk로 펼쳐짐 → 검색 단위가 문서에서 청크로 바뀐다.
+ * (Block 32 측정: input 토큰 97%가 통문서 주입 → 청크 단위로 쪼개 토큰 절감.)
+ */
+export type IndexedChunk = {
+  /** 출처 문서의 wiki 루트 기준 상대 경로 (인용 [[페이지명]] 생성용) */
+  path: string;
+  /** 출처 문서 절대 경로 (디버그용) */
+  absPath: string;
+  source: Source;
+  /** 청크 본문. 임베딩 + 컨텍스트 주입 대상. */
+  content: string;
+  /** 청크가 속한 헤딩 경로 (인용/디버그용) */
+  headingTrail: string[];
+  /** 출처 문서 내 청크 순번 */
+  chunkIndex: number;
   vector: number[];
 };
 
@@ -14,9 +33,9 @@ export type IndexedDocument = Document & {
  */
 declare global {
   // eslint-disable-next-line no-var
-  var __INDEX: IndexedDocument[] | undefined;
+  var __INDEX: IndexedChunk[] | undefined;
   // eslint-disable-next-line no-var
-  var __INDEX_BUILDING: Promise<IndexedDocument[]> | undefined;
+  var __INDEX_BUILDING: Promise<IndexedChunk[]> | undefined;
 }
 
 /**
@@ -28,7 +47,7 @@ declare global {
  * - __INDEX_BUILDING에 진행 중 Promise를 박아두면
  *   두 번째 요청은 같은 Promise를 await만 함.
  */
-export async function getIndex(): Promise<IndexedDocument[]> {
+export async function getIndex(): Promise<IndexedChunk[]> {
   if (globalThis.__INDEX) return globalThis.__INDEX;
   if (globalThis.__INDEX_BUILDING) return globalThis.__INDEX_BUILDING;
 
@@ -41,13 +60,33 @@ export async function getIndex(): Promise<IndexedDocument[]> {
   }
 }
 
-async function buildIndex(): Promise<IndexedDocument[]> {
-  const docs = await loadAllDocuments();
+async function buildIndex(): Promise<IndexedChunk[]> {
+  const documents = await loadAllDocuments();
+
+  // 각 문서를 청크로 쪼개고 (문서, 청크) 쌍으로 평탄화 → 임베딩 순서 보존.
+  const pendingChunks: { document: Document; chunk: Chunk }[] = [];
+  for (const document of documents) {
+    for (const chunk of chunkMarkdown(document.content)) {
+      pendingChunks.push({ document, chunk });
+    }
+  }
+
+  // 청크 본문을 한 번에 임베딩. embedBatch는 128개 초과 시 에러를 던짐.
+  // 위키가 커져 청크 수가 128을 넘으면 분할 호출 도입 필요(후속).
   const { vectors } = await embedBatch(
-    docs.map((d) => d.content),
+    pendingChunks.map((item) => item.chunk.content),
     "document"
   );
-  return docs.map((d, i) => ({ ...d, vector: vectors[i] }));
+
+  return pendingChunks.map((item, index) => ({
+    path: item.document.path,
+    absPath: item.document.absPath,
+    source: item.document.source,
+    content: item.chunk.content,
+    headingTrail: item.chunk.headingTrail,
+    chunkIndex: item.chunk.chunkIndex,
+    vector: vectors[index],
+  }));
 }
 
 /**
