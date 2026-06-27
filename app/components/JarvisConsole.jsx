@@ -253,8 +253,14 @@ export default function JarvisConsole() {
    * - 에러는 answer phase 에 (에러) 박스로 표시.
    * Multi-turn 정책 = Day 2 박힌 A 옵션 (매 턴 독립 검색, history 깨끗). 시안 single-turn UI 라 messages 도 단일.
    */
+  // 동시 실행 가드용 ref: 한글 IME에서 Enter가 두 번 발화되는 등으로 submitText가
+  // 두 번 불리면 두 스트림이 같은 answer 버퍼에 토큰을 쏟아 답변이 섞인다.
+  const inFlightRef = useRef(false);
+
   const submitText = useCallback(async (questionText) => {
     if (!questionText || !questionText.trim()) return;
+    if (inFlightRef.current) return; // 진행 중인 요청 있으면 두 번째 호출 무시
+    inFlightRef.current = true;
     clearTimers();
     setSrc('text');
     setQuestion(questionText);
@@ -335,6 +341,8 @@ export default function JarvisConsole() {
       setPhase('answer');
       setVoice('idle');
       setAnswer(`(에러) ${error instanceof Error ? error.message : 'unknown error'}`);
+    } finally {
+      inFlightRef.current = false; // 스트림 종료/에러 후 락 해제
     }
   }, [clearTimers]);
 
@@ -804,7 +812,7 @@ export default function JarvisConsole() {
                 value={input}
                 disabled={busyVoice()}
                 onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter') submitText(input); }}
+                onKeyDown={(e) => { if (e.key === 'Enter' && !e.nativeEvent.isComposing) submitText(input); }}
                 placeholder="자비스에게 물어보기…"
                 className="flex-1 border-none bg-transparent text-[17px] text-[#e8eef6] outline-none placeholder:text-[#5d6e82]"
               />
