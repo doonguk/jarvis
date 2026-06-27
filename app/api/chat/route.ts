@@ -59,7 +59,8 @@ export async function POST(request: Request) {
   // 검색 + 프롬프트 빌드까지는 스트림 시작 전에 처리 (실패 시 일반 400/500 응답).
   // 스트림 시작 후에는 HTTP 상태 변경 불가 — Next docs 'The HTTP contract' 참고.
   const query = lastMessage.content;
-  const hits = await search(query, 3, { weighted: true });
+  // maxPerDocument=2: 한 문서의 청크가 top-3를 독점하지 않게 (Block 35, 출처 다양성).
+  const hits = await search(query, 3, { weighted: true, maxPerDocument: 2 });
   const { system, userMessage } = buildPrompt(query, hits);
 
   const enrichedMessages: ChatMessage[] = [

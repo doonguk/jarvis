@@ -60,12 +60,16 @@ export type SearchHit = {
   /** 이 문서에 적용된 source 가중치. */
   weight: number;
   /**
-   * 문서 본문 전체. Block 10에서 buildPrompt가 Claude 컨텍스트로 박을 때 사용.
-   * Day 1은 청킹 X라 페이지 통째 — 1주차 청킹 도입 후엔 chunk 단위로 바뀜.
+   * 청크 본문. buildPrompt가 Claude 컨텍스트로 박을 때 사용.
+   * Block 34부터 페이지 통째가 아니라 chunk 단위.
    */
   content: string;
   /** 디버그 가독성용 미리보기 (앞 120자) */
   preview: string;
+  /** 청크가 속한 헤딩 경로 (인용/디버그용, Block 35) */
+  headingTrail: string[];
+  /** 출처 문서 내 청크 순번 (같은 문서의 어느 조각인지 식별) */
+  chunkIndex: number;
 };
 
 export type SearchOptions = {
@@ -80,6 +84,18 @@ export type SearchOptions = {
    * Voyage 호출을 1회로 줄이기 위함.
    */
   precomputedVector?: number[];
+  /**
+   * 한 문서가 top-k를 독점하지 못하게 문서당 청크 수를 제한 (Block 35).
+   *
+   * 청크 단위 인덱싱(Block 34) 후, 질문에 딱 맞는 문서 하나의 청크들이
+   * 점수를 싹쓸이해 top-k를 한 문서가 다 차지할 수 있음 → 출처 다양성 ↓ +
+   * 인용 중복. 이 값으로 "문서당 최대 N청크"만 뽑아 다양성을 확보한다.
+   *
+   * 미지정(undefined)이면 제한 없음 — Day 1~Block 34 동작 보존.
+   * (baseline-eval 같은 raw 측정 도구는 미지정으로 둬 측정 왜곡 방지.)
+   * chat 라우트는 2로 호출.
+   */
+  maxPerDocument?: number;
 };
 
 /**
@@ -93,24 +109,42 @@ export async function search(
   k = 3,
   options: SearchOptions = {}
 ): Promise<SearchHit[]> {
-  const { weighted = false, precomputedVector } = options;
+  const { weighted = false, precomputedVector, maxPerDocument } = options;
   const queryVector = precomputedVector ?? (await embedOne(query, "query"));
   const index = await getIndex();
 
-  const scored: SearchHit[] = index.map((document) => {
-    const rawScore = cosine(queryVector, document.vector);
-    const weight = SOURCE_WEIGHT[document.source];
+  const scored: SearchHit[] = index.map((chunk) => {
+    const rawScore = cosine(queryVector, chunk.vector);
+    const weight = SOURCE_WEIGHT[chunk.source];
     return {
-      path: document.path,
-      source: document.source,
+      path: chunk.path,
+      source: chunk.source,
       rawScore,
       weight,
       score: weighted ? rawScore * weight : rawScore,
-      content: document.content,
-      preview: document.content.slice(0, 120).replace(/\s+/g, " "),
+      content: chunk.content,
+      preview: chunk.content.slice(0, 120).replace(/\s+/g, " "),
+      headingTrail: chunk.headingTrail,
+      chunkIndex: chunk.chunkIndex,
     };
   });
 
   scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, k);
+
+  // 제한 없으면 단순 top-k.
+  if (maxPerDocument === undefined) {
+    return scored.slice(0, k);
+  }
+
+  // 점수 높은 순으로 훑되, 문서당 maxPerDocument개까지만 채택 → 출처 다양성 확보.
+  const selected: SearchHit[] = [];
+  const perDocumentCount = new Map<string, number>();
+  for (const hit of scored) {
+    if (selected.length >= k) break;
+    const usedCount = perDocumentCount.get(hit.path) ?? 0;
+    if (usedCount >= maxPerDocument) continue;
+    selected.push(hit);
+    perDocumentCount.set(hit.path, usedCount + 1);
+  }
+  return selected;
 }
